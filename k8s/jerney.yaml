@@ -1,0 +1,238 @@
+# ==============================================================
+# Jerney Blog Platform - Kubernetes Manifest (Ultra-Clean & Streamlined)
+# Kiến trúc 3-tier: Namespace, Secret, PVC, DB, Backend, Frontend
+# ==============================================================
+
+# ---- 1. Namespace ----
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jerney
+
+---
+# ---- 2. Secret: Thông tin đăng nhập Database ----
+# Sử dụng stringData để dễ đọc và bảo trì, K8s tự động mã hóa Base64 khi lưu vào etcd
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jerney-db-secret
+  namespace: jerney
+type: Opaque
+stringData:
+  POSTGRES_USER: jerney_user
+  POSTGRES_PASSWORD: jerney_pass_2026
+  POSTGRES_DB: jerney_db
+  DB_USER: jerney_user
+  DB_PASSWORD: jerney_pass_2026
+  DB_NAME: jerney_db
+
+---
+# ---- 3. PersistentVolumeClaim: Lưu trữ dữ liệu PostgreSQL ----
+# Tự động gắn với Default StorageClass của cụm (Minikube / Kind / AWS EKS)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jerney-db-pvc
+  namespace: jerney
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# ---- 4. Database Deployment (PostgreSQL 16) ----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jerney-db
+  namespace: jerney
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # RWO Volume yêu cầu Recreate để tránh lỗi gắn volume đồng thời
+  selector:
+    matchLabels:
+      app: jerney-db
+  template:
+    metadata:
+      labels:
+        app: jerney-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: jerney-db-secret
+          volumeMounts:
+            - name: db-storage
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "jerney_user", "-d", "jerney_db"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: jerney-db-pvc
+
+---
+# ---- 5. Database Service (ClusterIP - Chỉ nội bộ cụm) ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: jerney-db
+  namespace: jerney
+spec:
+  type: ClusterIP
+  selector:
+    app: jerney-db
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+# ---- 6. Backend Deployment (Node.js Express API) ----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jerney-backend
+  namespace: jerney
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jerney-backend
+  template:
+    metadata:
+      labels:
+        app: jerney-backend
+    spec:
+      # InitContainer: Đảm bảo PostgreSQL mở port 5432 xong mới khởi động backend
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z jerney-db 5432; do echo "Waiting for DB..."; sleep 2; done']
+      containers:
+        - name: backend
+          image: ghcr.io/iam-veeramalla/Jerney/jerney-backend:75da1da
+          ports:
+            - containerPort: 5000
+          env:
+            - name: PORT
+              value: "5000"
+            - name: DB_HOST
+              value: "jerney-db"
+            - name: DB_PORT
+              value: "5432"
+          envFrom:
+            - secretRef:
+                name: jerney-db-secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+# ---- 7. Backend Service (ClusterIP - Chỉ nội bộ cụm) ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: jerney-backend
+  namespace: jerney
+spec:
+  type: ClusterIP
+  selector:
+    app: jerney-backend
+  ports:
+    - port: 5000
+      targetPort: 5000
+
+---
+# ---- 8. Frontend Deployment (React + Nginx) ----
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jerney-frontend
+  namespace: jerney
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jerney-frontend
+  template:
+    metadata:
+      labels:
+        app: jerney-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/iam-veeramalla/Jerney/jerney-frontend:75da1da
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+
+---
+# ---- 9. Frontend Service (NodePort - Mở cổng truy cập từ ngoài) ----
+apiVersion: v1
+kind: Service
+metadata:
+  name: jerney-frontend
+  namespace: jerney
+spec:
+  type: NodePort
+  selector:
+    app: jerney-frontend
+  ports:
+    - port: 80
+      targetPort: 8080
