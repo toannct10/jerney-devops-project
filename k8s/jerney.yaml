@@ -128,7 +128,7 @@ spec:
           command: ['sh', '-c', 'until nc -z jerney-db 5432; do echo "Waiting for DB..."; sleep 2; done']
       containers:
         - name: backend
-          image: ghcr.io/iam-veeramalla/Jerney/jerney-backend:9cf68b5
+          image: ghcr.io/toannct10/jerney-devops-project/jerney-backend:9cf68b5
           ports:
             - containerPort: 5000
           env:
@@ -197,7 +197,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: ghcr.io/iam-veeramalla/Jerney/jerney-frontend:9cf68b5
+          image: ghcr.io/toannct10/jerney-devops-project/jerney-frontend:9cf68b5
           ports:
             - containerPort: 8080
           resources:
